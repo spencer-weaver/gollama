@@ -1,0 +1,11 @@
+{
+  "host": "HOST_NAME",
+  "port": "HOST_PORT",
+  "model": "MODEL_NAME",
+  "system": "SYSTEM_PROMPT",
+  "temperature": 0.3,
+  "token": "",
+  "maxTokens": -1,
+  "stream": true,
+  "history": true
+}
