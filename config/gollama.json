@@ -1,8 +1,8 @@
 {
-  "host": "HOST_NAME",
-  "port": "HOST_PORT",
-  "model": "MODEL_NAME",
-  "system": "SYSTEM_PROMPT",
+  "host": "localhost",
+  "port": "11434",
+  "model": "phi4-mini:latest",
+  "system": "you are an assistant in a math lab",
   "temperature": 0.3,
   "token": "",
   "maxTokens": -1,
