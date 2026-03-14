@@ -95,18 +95,6 @@ func callOllama(body map[string]any, cfg *config.GollamaConfig) (string, error) 
 	return streamReply(resp.Body)
 }
 
-// internal/ollama.go (or any suitable file)
-// Only the fields we need are included.
-type ollamaChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-			Role    string `json:"role"`
-		} `json:"delta"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-}
-
 type msgJSON struct {
 	Model     string  `json:"model"`
 	CreatedAt string  `json:"created_at"`
@@ -172,6 +160,8 @@ func streamReply(r io.Reader) (string, error) {
 	if err := scanner.Err(); err != nil {
 		return "", err
 	}
+
+	fmt.Println()
 
 	// Finally, return the collected assistant text.
 	return assistant.String(), nil
