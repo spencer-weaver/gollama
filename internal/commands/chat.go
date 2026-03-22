@@ -1,168 +1,177 @@
 package commands
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
+	"github.com/spencer-weaver/gollama/chat"
 	"github.com/spencer-weaver/gollama/internal/config"
+	"github.com/spencer-weaver/gollama/internal/tools"
 )
 
-// 2️⃣  Main handler – builds the request, calls Ollama, updates history.
+// ChatHandler is the CLI entry point for the "chat" command.
+//
+// Flags:
+//
+//	-m <name>        load a model config from models/<name>.json
+//	--tools <name>   enable a tool set without loading a model config (e.g. research, analyze)
+//	--no-history     disable conversation history for this call
 func ChatHandler(args []string) error {
-	// --- 2️⃣.1  Parse command‑line flags ------------------------------------------------
-	if len(args) == 0 {
-		return fmt.Errorf("no user prompt supplied")
-	}
-	userPrompt := strings.Join(args, " ")
-
-	cfg := config.GetGlobal()
-
-	// --- 2️⃣.2  Build messages slice ---------------------------------------------------
-	messages := []config.Msg{}
-
-	// system prompt
-	messages = append(messages, config.Msg{Role: "system", Content: cfg.System})
-
-	// stored conversation history (if any)
-	if cfg.History && len(cfg.HistoryMessages) > 0 {
-		messages = append(messages, cfg.HistoryMessages...)
-	}
-
-	// --- 2️⃣.3  Append the new user message ---------------------------------------------
-	messages = append(messages, config.Msg{Role: "user", Content: userPrompt})
-
-	// --- 2️⃣.3  Build the request payload -----------------------------------------------
-	bodyMap := map[string]any{
-		"model":       cfg.Model,
-		"temperature": cfg.Temperature,
-		"max_tokens":  cfg.MaxTokens,
-		"stream":      true,
-		"messages":    messages,
-	}
-
-	// --- 2️⃣.4  Send request to Ollama ----------------------------------------------------
-	assistantMsg, err := callOllama(bodyMap, cfg)
-	if err != nil {
+	flags := flag.NewFlagSet("chat", flag.ContinueOnError)
+	modelName := flags.String("m", "", "model config name (from models/)")
+	modeFlag := flags.String("tools", "", "tool set to enable (e.g. research, analyze)")
+	noHistory := flags.Bool("no-history", false, "disable conversation history")
+	showThinking := flags.Bool("show-thinking", false, "show model reasoning (<think> blocks) in output")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
-	// --- 2️⃣.5  Persist history (if enabled) ---------------------------------------------
-	if cfg.History {
-		// Append the user prompt
-		cfg.HistoryMessages = append(cfg.HistoryMessages, config.Msg{Role: "user", Content: userPrompt})
-		// Append the agent reply
-		cfg.HistoryMessages = append(cfg.HistoryMessages, config.Msg{Role: "assistant", Content: assistantMsg})
+	remaining := flags.Args()
+	if len(remaining) == 0 {
+		return fmt.Errorf("no user prompt supplied")
+	}
+	userPrompt := strings.Join(remaining, " ")
 
+	cfg := config.GetGlobal()
+
+	// Resolve models directory.
+	modelsDir := cfg.ModelsDir
+	if modelsDir == "" {
+		modelsDir = "models"
+	}
+
+	// Load model config if -m was provided.
+	var mc *config.ModelConfig
+	if *modelName != "" {
+		var err error
+		mc, err = config.LoadModelConfig(modelsDir, *modelName)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Build chat config; model config fields override global where set.
+	chatCfg := chat.Config{
+		Host:         cfg.Host,
+		Port:         cfg.Port,
+		Model:        cfg.Model,
+		System:       cfg.System,
+		Temperature:  cfg.Temperature,
+		MaxTokens:    cfg.MaxTokens,
+		ShowThinking: *showThinking,
+	}
+	if mc != nil {
+		if mc.Model != "" {
+			chatCfg.Model = mc.Model
+		}
+		if mc.System != "" {
+			chatCfg.System = mc.System
+		}
+		if mc.Temperature != 0 {
+			chatCfg.Temperature = mc.Temperature
+		}
+		if mc.MaxTokens != 0 {
+			chatCfg.MaxTokens = mc.MaxTokens
+		}
+	}
+
+	// Determine active tools. Priority: model config tools > --mode flag > model config toolMode.
+	toolMode := *modeFlag
+	if toolMode == "" && mc != nil {
+		toolMode = mc.ToolMode
+	}
+
+	var allowedTools []string
+	if mc != nil && len(mc.Tools) > 0 {
+		allowedTools = mc.Tools
+	} else if toolMode != "" {
+		allowedTools = tools.ToolsForMode(toolMode)
+		if allowedTools == nil {
+			return fmt.Errorf("unknown tool mode %q", toolMode)
+		}
+	}
+
+	// Prepend tool guide to system prompt when tools are active.
+	// Prepending ensures the model sees the tool instructions before its
+	// persona/task description, which improves compliance on smaller models.
+	reg := tools.DefaultRegistry()
+	if len(allowedTools) > 0 {
+		chatCfg.System = reg.ToolGuide(allowedTools) + chatCfg.System
+	}
+
+	// Build conversation history.
+	useHistory := cfg.History && !*noHistory
+	var history []chat.Msg
+	if useHistory {
+		for _, m := range cfg.HistoryMessages {
+			history = append(history, chat.Msg{Role: m.Role, Content: m.Content})
+		}
+	}
+
+	// Tool loop: run up to maxIter turns so the model can chain tool calls.
+	const maxIter = 10
+	currentPrompt := userPrompt
+	var finalReply string
+
+	for i := 0; i < maxIter; i++ {
+		reply, err := chat.ChatWithHistory(chatCfg, history, currentPrompt)
+		if err != nil {
+			return err
+		}
+
+		// If no tools are active, or the model produced no tool calls, we're done.
+		if len(allowedTools) == 0 {
+			finalReply = reply
+			break
+		}
+
+		calls, cleaned, hasCalls := tools.ParseToolCalls(reply)
+		if !hasCalls {
+			finalReply = reply
+			break
+		}
+
+		// Print any text the model wrote before the tool_calls block.
+		if cleaned != "" {
+			fmt.Println(cleaned)
+		}
+
+		// Show which tools are being called.
+		names := make([]string, len(calls))
+		for j, c := range calls {
+			names[j] = c.Tool
+		}
+		fmt.Printf("[calling tools: %s]\n", strings.Join(names, ", "))
+
+		// Execute all tool calls and build results message.
+		toolResults := reg.RunToolLoop(calls)
+
+		// Extend history with this turn so the model has full context next round.
+		history = append(history,
+			chat.Msg{Role: "user", Content: currentPrompt},
+			chat.Msg{Role: "assistant", Content: reply},
+		)
+		currentPrompt = toolResults
+
+		// On final iteration, surface tool results as the reply.
+		if i == maxIter-1 {
+			finalReply = toolResults
+		}
+	}
+
+	fmt.Println(finalReply)
+
+	// Persist the original user prompt + final reply to history.
+	if useHistory {
+		cfg.HistoryMessages = append(cfg.HistoryMessages,
+			config.Msg{Role: "user", Content: userPrompt},
+			config.Msg{Role: "assistant", Content: finalReply},
+		)
 		if err := config.SaveConfigFile(config.GetGlobalPath(), cfg); err != nil {
 			return fmt.Errorf("failed to persist history: %w", err)
 		}
 	}
 
 	return nil
-}
-
-// 2️⃣  Call Ollama and stream the reply -----------------------------------------------
-func callOllama(body map[string]any, cfg *config.GollamaConfig) (string, error) {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("marshal body: %w", err)
-	}
-
-	url := fmt.Sprintf("http://%s:%s/api/chat", cfg.Host, cfg.Port)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(payload))
-	if err != nil {
-		return "", fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("Ollama request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Ollama %d: %s", resp.StatusCode, string(msg))
-	}
-
-	// streamReply will echo to stdout and return the assistant text.
-	return streamReply(resp.Body)
-}
-
-type msgJSON struct {
-	Model     string  `json:"model"`
-	CreatedAt string  `json:"created_at"`
-	Message   msgBody `json:"message"`
-	Done      bool    `json:"done"`
-}
-type msgBody struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// streamReply reads the server‑sent event stream from Ollama and
-// concatenates all "content" fragments that appear in the
-// "delta" objects.  It also stops when the stream emits "[DONE]".
-func streamReply(r io.Reader) (string, error) {
-	var assistant strings.Builder
-	scanner := bufio.NewScanner(r)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			// Empty line – separator between events
-			continue
-		}
-
-		// Try to decode the line as JSON
-		var m msgJSON
-		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
-			// If it isn’t JSON, ignore or log it
-			fmt.Printf("non‑JSON line: %q\n", trimmed)
-			continue
-		}
-
-		// Skip empty content (e.g. the server sometimes sends “” or “ ”)
-		if strings.TrimSpace(m.Message.Content) == "" {
-			continue
-		}
-
-		// Strip the prefix and any surrounding whitespace.
-		raw := m.Message.Content
-
-		// Ollama signals stream end with "[DONE]".
-		if raw == "[DONE]" {
-			break
-		}
-
-		// (Optional) print the raw JSON for debugging; you can remove it if you
-		// prefer the final answer only.
-		fmt.Print(raw)
-		assistant.WriteString(raw)
-
-		// All choice objects are in the same order as sent by Ollama; we just
-		// care about the textual payload.
-		// for _, c := range m. {
-		// 	if c.Delta.Content != "" {
-		// 		assistant.WriteString(c.Delta.Content)
-		// 	}
-		// }
-	}
-
-	// Return any scanner error that happened while reading.
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-
-	fmt.Println()
-
-	// Finally, return the collected assistant text.
-	return assistant.String(), nil
 }
