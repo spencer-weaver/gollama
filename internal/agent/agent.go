@@ -148,7 +148,7 @@ func (a *Agent) runWithTools(ollCfg chat.Config, history []chat.Msg, prompt stri
 			return reply, nil
 		}
 
-		calls, cleaned, found := tools.ParseToolCalls(reply)
+		calls, cleaned, found := a.reg.ParseToolCalls(reply)
 		if !found {
 			return reply, nil
 		}

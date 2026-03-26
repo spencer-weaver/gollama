@@ -46,22 +46,26 @@ func (r *Registry) Get(name string) (Tool, bool) {
 // receives priority attention from the model.
 func (r *Registry) ToolGuide(allowed []string) string {
 	var sb strings.Builder
-	sb.WriteString("## TOOLS — REQUIRED\n")
-	sb.WriteString("You have tools available. You MUST use them to complete tasks — do NOT attempt to answer from memory or claim you cannot access information.\n\n")
-	sb.WriteString("To call a tool, output a tool_calls block and STOP. Wait for results before continuing.\n\n")
+	sb.WriteString("## TOOLS\n")
+	sb.WriteString("When you need to use a tool, output ONLY a tool_calls block in this EXACT format and then stop:\n\n")
 
-	// Concrete example using the first real tool name.
-	exampleTool := "list_dir"
-	if len(allowed) > 0 {
-		exampleTool = allowed[0]
-	}
-	sb.WriteString("Format:\n")
 	sb.WriteString("<tool_calls>\n")
-	sb.WriteString(fmt.Sprintf("[{\"tool\": \"%s\", \"args\": {\"path\": \".\"}}]\n", exampleTool))
+	sb.WriteString("[{\"tool\": \"<tool_name>\", \"args\": {<args>}}]\n")
 	sb.WriteString("</tool_calls>\n\n")
 
+	// Concrete example using the first real allowed tool name.
+	if len(allowed) > 0 {
+		exampleTool := allowed[0]
+		sb.WriteString("Example:\n")
+		sb.WriteString("<tool_calls>\n")
+		sb.WriteString(fmt.Sprintf("[{\"tool\": \"%s\", \"args\": {}}]\n", exampleTool))
+		sb.WriteString("</tool_calls>\n\n")
+	}
+
 	sb.WriteString("Rules:\n")
-	sb.WriteString("- Call tools one batch at a time; stop after each <tool_calls> block\n")
+	sb.WriteString("- Use ONLY the <tool_calls>[...]</tool_calls> format shown above — no other format\n")
+	sb.WriteString("- Output the <tool_calls> block and STOP immediately — do not write anything after it\n")
+	sb.WriteString("- Wait for tool results before continuing your response\n")
 	sb.WriteString("- Do not guess or fabricate results — always use a tool to retrieve real data\n")
 	sb.WriteString("- You may call multiple tools in one batch by adding more objects to the JSON array\n\n")
 
@@ -78,8 +82,11 @@ func (r *Registry) ToolGuide(allowed []string) string {
 // toolCallPattern matches <tool_calls>...</tool_calls> blocks (including newlines).
 var toolCallPattern = regexp.MustCompile(`(?s)<tool_calls>\s*(.*?)\s*</tool_calls>`)
 
-// ParseToolCalls extracts tool calls from a model response.
-// Returns the parsed calls, the response with the block stripped, and whether any calls were found.
+// ParseToolCalls extracts tool calls from a model response using the
+// <tool_calls>[...]</tool_calls> format. Returns the parsed calls, the response
+// with the block stripped, and whether any calls were found.
+// This package-level function handles format 1 only. Use Registry.ParseToolCalls
+// for multi-format detection including per-tool tags from llama3.2-style models.
 func ParseToolCalls(response string) ([]ToolCall, string, bool) {
 	match := toolCallPattern.FindStringSubmatch(response)
 	if match == nil {
@@ -95,6 +102,53 @@ func ParseToolCalls(response string) ([]ToolCall, string, bool) {
 	}
 	cleaned := strings.TrimSpace(toolCallPattern.ReplaceAllString(response, ""))
 	return calls, cleaned, true
+}
+
+// ParseToolCalls extracts tool calls from a model response, handling two formats:
+//
+//  1. <tool_calls>[{"tool": "name", "args": {...}}]</tool_calls>
+//     (canonical format, all models)
+//
+//  2. <tool_name>{...}</tool_name>
+//     (per-tool tag format emitted by llama3.2:3b and similar models)
+//
+// Format 1 is tried first. Format 2 is tried only for tool names registered
+// in this registry. Returns the parsed calls, the response with the tool block
+// stripped, and whether any calls were found.
+func (r *Registry) ParseToolCalls(response string) ([]ToolCall, string, bool) {
+	// Format 1 — canonical <tool_calls> block.
+	if calls, cleaned, ok := ParseToolCalls(response); ok {
+		return calls, cleaned, ok
+	}
+
+	// Format 2 — <tool_name>{...}</tool_name> per-tool tag.
+	for toolName := range r.tools {
+		openTag := "<" + toolName + ">"
+		closeTag := "</" + toolName + ">"
+
+		start := strings.Index(response, openTag)
+		if start == -1 {
+			continue
+		}
+		rest := response[start+len(openTag):]
+		end := strings.Index(rest, closeTag)
+		if end == -1 {
+			continue
+		}
+
+		body := strings.TrimSpace(rest[:end])
+		var args map[string]any
+		if err := json.Unmarshal([]byte(body), &args); err != nil {
+			continue
+		}
+
+		before := response[:start]
+		after := rest[end+len(closeTag):]
+		cleaned := strings.TrimSpace(before + after)
+		return []ToolCall{{Tool: toolName, Args: args}}, cleaned, true
+	}
+
+	return nil, response, false
 }
 
 // Execute runs a single tool call and returns a formatted result string.
