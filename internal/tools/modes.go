@@ -36,6 +36,11 @@ var BuiltinModes = map[string]Mode{
 		Description: "Research a component: search the web, fetch datasheets, write component IR",
 		Tools:       []string{"search_web", "fetch_url", "write_file", "read_file"},
 	},
+	"ha": {
+		Name:        "ha",
+		Description: "Home Assistant agent: run shell commands and spawn background tasks for long-running actions",
+		Tools:       []string{"run_command", "spawn_background"},
+	},
 }
 
 // DefaultRegistry returns a Registry pre-populated with all built-in tools.

@@ -3,15 +3,24 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
+	"github.com/spencer-weaver/gollama/internal/agent"
 	"github.com/spencer-weaver/gollama/internal/commands"
 	"github.com/spencer-weaver/gollama/internal/config"
+	"github.com/spencer-weaver/gollama/internal/conversation"
+	"github.com/spencer-weaver/gollama/internal/handler"
+	"github.com/spencer-weaver/gollama/internal/server"
+	"github.com/spencer-weaver/gollama/internal/tasks"
 )
 
 func usage() {
-	fmt.Println("usage: gollama [-c config] <command> [flags] [args...]")
+	fmt.Println("usage: gollama [-c config] [command [flags] [args...]]")
+	fmt.Println()
+	fmt.Println("  Run with no command to start the HTTP conversation agent server.")
 	fmt.Println()
 	fmt.Println("global flags:")
 	fmt.Println("  -c <path>   path to config file (optional; defaults resolved from binary location)")
@@ -23,30 +32,12 @@ func usage() {
 	fmt.Println("  voice       [--topic topic] [--threshold N] [--stt backend] [--tts backend]")
 	fmt.Println("  agent       [--audio-device dev] [--playback-device dev] [--stt-model model] [--proactive-delay N]")
 	fmt.Println("  pcb-design  <name> [--threshold N] [--output path] [--session path]")
-	fmt.Println()
-	fmt.Println("chat flags:")
-	fmt.Println("  -m <name>          load agent model config from models/<name>.json")
-	fmt.Println("  --tools <toolset>  enable a tool set without loading a model config (e.g. research, analyze)")
-	fmt.Println("  --no-history       disable conversation history for this call")
-	fmt.Println()
-	fmt.Println("brainstorm flags:")
-	fmt.Println("  --threshold N      completeness score (0-100) to end brainstorm (default 80)")
-	fmt.Println("  --session path     path to session file (default: <root>/sessions/<slug>.json)")
-	fmt.Println("  --sessions dir     directory for session files")
-	fmt.Println("  --no-plan          skip automatic plan prompt after brainstorm ends")
-	fmt.Println()
-	fmt.Println("plan flags:")
-	fmt.Println("  --session path     path to session file")
-	fmt.Println("  --sessions dir     directory for session files")
-	fmt.Println("  --topic slug       derive session path from topic slug")
 }
 
 func main() {
-	// Resolve the project root from the real binary location (follows symlinks).
 	root := resolveRoot()
 	config.SetGlobalRoot(root)
 
-	// Parse global flags that appear before the subcommand.
 	flags := flag.NewFlagSet("gollama", flag.ContinueOnError)
 	flags.Usage = usage
 	var configPath string
@@ -64,13 +55,6 @@ func main() {
 	}
 	config.SetGlobalPath(configPath)
 
-	subArgs := flags.Args()
-	if len(subArgs) == 0 {
-		usage()
-		os.Exit(1)
-	}
-
-	// Load config file if it exists; otherwise use built-in defaults.
 	cfg := config.DefaultConfig()
 	if _, err := os.Stat(configPath); err == nil {
 		if err := config.LoadConfigData(configPath, cfg); err != nil {
@@ -78,18 +62,45 @@ func main() {
 			os.Exit(1)
 		}
 	} else if configExplicit {
-		// The user explicitly passed -c; fail if it can't be read.
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// If ModelsDir is not set, derive it from the project root.
 	if cfg.ModelsDir == "" {
 		cfg.ModelsDir = filepath.Join(root, "models")
 	}
-
 	config.SetGlobal(cfg)
 
+	subArgs := flags.Args()
+
+	// No subcommand → start the HTTP conversation agent server.
+	if len(subArgs) == 0 {
+		runServer(cfg)
+		return
+	}
+
+	runCLI(subArgs)
+}
+
+func runServer(cfg *config.GollamaConfig) {
+	store := conversation.NewStore()
+	tm := tasks.NewManager()
+	ag := agent.New(cfg, store, tm)
+
+	addr := cfg.ListenAddr
+	if addr == "" {
+		addr = ":8080"
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/conversation/process", handler.NewProcessHandler(ag))
+
+	srv := server.New(addr, mux)
+	log.Printf("gollama listening on %s", addr)
+	log.Fatal(srv.ListenAndServe())
+}
+
+func runCLI(subArgs []string) {
 	switch subArgs[0] {
 	case "chat":
 		if err := commands.ChatHandler(subArgs[1:]); err != nil {

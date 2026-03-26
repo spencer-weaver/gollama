@@ -24,6 +24,8 @@ func DefaultConfig() *GollamaConfig {
 		Temperature: 0.7,
 		MaxTokens:   -1,
 		History:     false,
+		ListenAddr:  ":8080",
+		AgentModel:  "ha-agent",
 	}
 }
 
@@ -39,6 +41,10 @@ type GollamaConfig struct {
 	Stream      bool    `json:"stream"`    // if true, use a streamed response
 	History     bool    `json:"history"`   // if true, keep the conversation history
 	ModelsDir   string  `json:"modelsDir"` // directory for agent model configs (default: "models")
+
+	// HTTP server settings (used when running as a conversation agent server).
+	ListenAddr string `json:"listenAddr"` // e.g. ":8080"
+	AgentModel string `json:"agentModel"` // model config name to load for the HA agent
 
 	HistoryMessages []Msg `json:"historyMessages,omitempty"`
 }
