@@ -21,6 +21,8 @@ func usage() {
 	fmt.Println("  brainstorm  [--threshold N] [--session path] [--sessions dir] <topic>")
 	fmt.Println("  plan        [--session path] [--sessions dir] [--topic slug]")
 	fmt.Println("  voice       [--topic topic] [--threshold N] [--stt backend] [--tts backend]")
+	fmt.Println("  agent       [--audio-device dev] [--playback-device dev] [--stt-model model] [--proactive-delay N]")
+	fmt.Println("  pcb-design  <name> [--threshold N] [--output path] [--session path]")
 	fmt.Println()
 	fmt.Println("chat flags:")
 	fmt.Println("  -m <name>          load agent model config from models/<name>.json")
@@ -106,6 +108,16 @@ func main() {
 		}
 	case "voice":
 		if err := commands.VoiceHandler(subArgs[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "agent":
+		if err := commands.AgentRun(subArgs[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "pcb-design":
+		if err := commands.PCBDesignHandler(subArgs[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

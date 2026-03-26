@@ -26,12 +26,23 @@ var BuiltinModes = map[string]Mode{
 		Description: "Full dev environment: read, write, search, and run commands",
 		Tools:       []string{"list_dir", "read_file", "write_file", "find_files", "search_files", "run_command"},
 	},
+	"agent": {
+		Name:        "agent",
+		Description: "Voice agent: run commands, spawn background tasks, delegate to Claude",
+		Tools:       []string{"run_command", "spawn_background", "ask_claude"},
+	},
+	"part-research": {
+		Name:        "part-research",
+		Description: "Research a component: search the web, fetch datasheets, write component IR",
+		Tools:       []string{"search_web", "fetch_url", "write_file", "read_file"},
+	},
 }
 
 // DefaultRegistry returns a Registry pre-populated with all built-in tools.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(NewFetchURLTool())
+	r.Register(NewSearchWebTool())
 	r.Register(NewReadFileTool())
 	r.Register(NewListDirTool())
 	r.Register(NewFindFilesTool())
