@@ -3,3 +3,11 @@ config/*
 sessions/*
 .venv/
 scripts/__pycache__/
+
+# logs
+*.log
+
+# Go build artifacts
+*.exe
+*.test
+*.out

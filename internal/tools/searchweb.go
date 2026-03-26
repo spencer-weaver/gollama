@@ -1,37 +1,49 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 )
 
-// SearchWebTool performs a DuckDuckGo web search and returns a list of result URLs.
+const defaultSearXNGURL = "http://localhost:8080/search"
+
+// SearchWebTool queries a SearXNG instance and returns the top results.
 // The model is expected to use fetch_url to read any result it wants to inspect.
 type SearchWebTool struct {
-	client *http.Client
+	baseURL string
+	client  *http.Client
 }
 
-func NewSearchWebTool() *SearchWebTool {
+// NewSearchWebTool returns a SearchWebTool pointed at baseURL.
+// If baseURL is empty it falls back to defaultSearXNGURL.
+func NewSearchWebTool(baseURL string) *SearchWebTool {
+	if baseURL == "" {
+		baseURL = defaultSearXNGURL
+	}
 	return &SearchWebTool{
-		client: &http.Client{Timeout: 20 * time.Second},
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 15 * time.Second},
 	}
 }
 
 func (t *SearchWebTool) Name() string { return "search_web" }
 func (t *SearchWebTool) Description() string {
-	return `Search the web for a query. Returns titled URLs — use fetch_url to read any result. Args: {"query": "TMC2209 datasheet site:trinamic.com"}`
+	return `Search the web via SearXNG. Returns titles, URLs, and snippets. Args: {"query": "qwen3 quantization benchmarks"}`
 }
 
-// reResultHref extracts DuckDuckGo result redirect links (/l/?uddg=...)
-var reResultHref = regexp.MustCompile(`href="(/l/\?[^"]+uddg=[^"]+)"`)
+type searxResult struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Content string `json:"content"`
+}
 
-// reTitleInner extracts visible anchor text from result links
-var reTitleInner = regexp.MustCompile(`class="result__a"[^>]*>([^<]{3,120})<`)
+type searxResponse struct {
+	Results []searxResult `json:"results"`
+}
 
 func (t *SearchWebTool) Execute(args map[string]any) (string, error) {
 	query, ok := args["query"].(string)
@@ -39,59 +51,42 @@ func (t *SearchWebTool) Execute(args map[string]any) (string, error) {
 		return "", fmt.Errorf("query arg required")
 	}
 
-	searchURL := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
-	req, err := http.NewRequest("GET", searchURL, nil)
+	endpoint := t.baseURL + "?q=" + url.QueryEscape(query) + "&format=json&categories=general"
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("search_web: build request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("search_web: %w", err)
+		return "", fmt.Errorf("search_web: SearXNG unreachable (%s): %w", t.baseURL, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
-	if err != nil {
-		return "", fmt.Errorf("search_web read: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("search_web: SearXNG returned %d", resp.StatusCode)
 	}
-	html := string(body)
 
-	hrefs := reResultHref.FindAllStringSubmatch(html, 20)
-	titles := reTitleInner.FindAllStringSubmatch(html, 20)
+	var sr searxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		return "", fmt.Errorf("search_web: decode response: %w", err)
+	}
+
+	if len(sr.Results) == 0 {
+		return fmt.Sprintf("No results found for: %s", query), nil
+	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Results for: %q\n\n", query))
-
-	count := 0
-	for i, h := range hrefs {
-		if count >= 8 {
+	for i, r := range sr.Results {
+		if i >= 8 {
 			break
 		}
-		// Parse uddg= from the redirect path
-		raw := strings.TrimPrefix(h[1], "/l/?")
-		// The href may be HTML-escaped (&amp;)
-		raw = strings.ReplaceAll(raw, "&amp;", "&")
-		params, err := url.ParseQuery(raw)
-		if err != nil {
-			continue
+		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n", i+1, r.Title, r.URL))
+		if r.Content != "" {
+			sb.WriteString(fmt.Sprintf("   %s\n", r.Content))
 		}
-		actualURL := params.Get("uddg")
-		if actualURL == "" {
-			continue
-		}
-		title := "(no title)"
-		if i < len(titles) {
-			title = strings.TrimSpace(titles[i][1])
-		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n\n", count+1, title, actualURL))
-		count++
-	}
-
-	if count == 0 {
-		return fmt.Sprintf("No results found for: %s", query), nil
+		sb.WriteString("\n")
 	}
 	return sb.String(), nil
 }

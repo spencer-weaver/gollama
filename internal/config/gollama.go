@@ -26,6 +26,8 @@ func DefaultConfig() *GollamaConfig {
 		History:     false,
 		ListenAddr:  ":8080",
 		AgentModel:  "ha-agent",
+		SearXNGURL:  "http://localhost:8080/search",
+		HAHost:      "http://homeassistant.local:8123",
 	}
 }
 
@@ -45,6 +47,11 @@ type GollamaConfig struct {
 	// HTTP server settings (used when running as a conversation agent server).
 	ListenAddr string `json:"listenAddr"` // e.g. ":8080"
 	AgentModel string `json:"agentModel"` // model config name to load for the HA agent
+
+	// External service config.
+	SearXNGURL string `json:"searxngURL"` // SearXNG base URL (default http://localhost:8080/search)
+	HAHost     string `json:"haHost"`     // Home Assistant base URL (default http://homeassistant.local:8123)
+	HAToken    string `json:"haToken"`    // Home Assistant long-lived access token
 
 	HistoryMessages []Msg `json:"historyMessages,omitempty"`
 }

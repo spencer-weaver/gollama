@@ -38,16 +38,18 @@ var BuiltinModes = map[string]Mode{
 	},
 	"ha": {
 		Name:        "ha",
-		Description: "Home Assistant agent: run shell commands and spawn background tasks for long-running actions",
-		Tools:       []string{"run_command", "spawn_background"},
+		Description: "Home Assistant agent: control HA devices, run shell commands, spawn background tasks",
+		Tools:       []string{"call_ha_service", "run_command", "spawn_background"},
 	},
 }
 
 // DefaultRegistry returns a Registry pre-populated with all built-in tools.
+// search_web is registered with an empty URL so it falls back to the default
+// SearXNG address; callers that have an explicit URL should re-register it.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(NewFetchURLTool())
-	r.Register(NewSearchWebTool())
+	r.Register(NewSearchWebTool(""))
 	r.Register(NewReadFileTool())
 	r.Register(NewListDirTool())
 	r.Register(NewFindFilesTool())

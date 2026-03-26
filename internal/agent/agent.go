@@ -33,7 +33,10 @@ type Agent struct {
 // of the global config values.
 func New(cfg *config.GollamaConfig, store *conversation.Store, tm *tasks.Manager) *Agent {
 	reg := tools.DefaultRegistry()
+	// Re-register config-aware tools with explicit values from GollamaConfig.
+	reg.Register(tools.NewSearchWebTool(cfg.SearXNGURL))
 	reg.Register(tools.NewSpawnBackgroundTool(tm))
+	reg.Register(tools.NewHAServiceTool(cfg.HAHost, cfg.HAToken))
 
 	ollCfg := chat.Config{
 		Host:        cfg.Host,
