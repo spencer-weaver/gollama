@@ -69,6 +69,7 @@ func main() {
 	if cfg.ModelsDir == "" {
 		cfg.ModelsDir = filepath.Join(root, "models")
 	}
+	cfg.ApplyEnv()
 	config.SetGlobal(cfg)
 
 	subArgs := flags.Args()

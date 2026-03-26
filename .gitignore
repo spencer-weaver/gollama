@@ -4,6 +4,9 @@ sessions/*
 .venv/
 scripts/__pycache__/
 
+# secrets
+.env
+
 # logs
 *.log
 

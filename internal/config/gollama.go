@@ -1,6 +1,9 @@
 package config
 
-import "sync"
+import (
+	"os"
+	"sync"
+)
 
 var globalCfg *GollamaConfig
 var globalRoot string // absolute path to the project root (bin/..)
@@ -54,6 +57,24 @@ type GollamaConfig struct {
 	HAToken    string `json:"haToken"`    // Home Assistant long-lived access token
 
 	HistoryMessages []Msg `json:"historyMessages,omitempty"`
+}
+
+// ApplyEnv fills in any fields that are still at their compiled-in default
+// with values from environment variables. Priority: config file > env > default.
+// The check against DefaultConfig() values is how we detect "not explicitly set
+// by the config file" — if the config file wrote the same value as the default
+// that's indistinguishable, but in practice users override or leave blank.
+func (c *GollamaConfig) ApplyEnv() {
+	d := DefaultConfig()
+	if v := os.Getenv("HA_TOKEN"); v != "" && c.HAToken == d.HAToken {
+		c.HAToken = v
+	}
+	if v := os.Getenv("HA_HOST"); v != "" && c.HAHost == d.HAHost {
+		c.HAHost = v
+	}
+	if v := os.Getenv("SEARXNG_URL"); v != "" && c.SearXNGURL == d.SearXNGURL {
+		c.SearXNGURL = v
+	}
 }
 
 // Msg is identical to the one used in chat_debug.go.

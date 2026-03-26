@@ -1,0 +1,13 @@
+services:
+  gollama:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config    # persists gollama.json with overrides
+      - ./models:/app/models    # persists agent personality configs
+    environment:
+      - HA_HOST=${HA_HOST:-http://homeassistant.local:8123}
+      - HA_TOKEN=${HA_TOKEN}
+      - SEARXNG_URL=${SEARXNG_URL:-http://localhost:8080/search}
+    restart: unless-stopped
