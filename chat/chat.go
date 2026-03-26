@@ -10,12 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 )
 
-// reThink strips <think>...</think> blocks emitted by reasoning models (e.g. qwen3).
-var reThink = regexp.MustCompile(`(?s)<think>.*?</think>`)
+// Previous approach used regexp.MustCompile(`(?s)<think>.*?</think>`) but the
+// regex was unreliable in practice — replaced with stripThinkBlocks below.
 
 // Config holds the connection and model parameters for an Ollama request.
 type Config struct {
@@ -32,6 +31,26 @@ type Config struct {
 type Msg struct {
 	Role    string // "user" | "assistant" | "system"
 	Content string
+}
+
+// stripThinkBlocks removes all <think>...</think> sections from s.
+// If a <think> tag has no matching </think>, everything from that tag onward
+// is truncated. The result is whitespace-trimmed.
+func stripThinkBlocks(s string) string {
+	for {
+		start := strings.Index(s, "<think>")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(s[start:], "</think>")
+		if end == -1 {
+			// unclosed tag — truncate everything from <think> onward
+			s = s[:start]
+			break
+		}
+		s = s[:start] + s[start+end+len("</think>"):]
+	}
+	return strings.TrimSpace(s)
 }
 
 // Chat sends a single prompt with no conversation history and returns the
@@ -99,13 +118,9 @@ func ChatWithHistory(cfg Config, history []Msg, prompt string) (string, error) {
 		return "", err
 	}
 	if !cfg.ShowThinking {
-		result = reThink.ReplaceAllString(result, "")
-		// Catch any unclosed <think> block (model truncated mid-thought).
-		if idx := strings.Index(result, "<think>"); idx >= 0 {
-			result = result[:idx]
-		}
+		result = stripThinkBlocks(result)
 	}
-	return strings.TrimSpace(result), nil
+	return result, nil
 }
 
 // ── internal streaming types ──────────────────────────────────────────────────
