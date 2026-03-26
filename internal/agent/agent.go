@@ -37,6 +37,7 @@ func New(cfg *config.GollamaConfig, store *conversation.Store, tm *tasks.Manager
 	reg.Register(tools.NewSearchWebTool(cfg.SearXNGURL))
 	reg.Register(tools.NewSpawnBackgroundTool(tm))
 	reg.Register(tools.NewHAServiceTool(cfg.HAHost, cfg.HAToken))
+	reg.Register(tools.NewHAStatesTool(cfg.HAHost, cfg.HAToken))
 
 	ollCfg := chat.Config{
 		Host:        cfg.Host,

@@ -39,7 +39,7 @@ var BuiltinModes = map[string]Mode{
 	"ha": {
 		Name:        "ha",
 		Description: "Home Assistant agent: control HA devices, run shell commands, spawn background tasks",
-		Tools:       []string{"call_ha_service", "run_command", "spawn_background"},
+		Tools:       []string{"get_ha_states", "call_ha_service", "run_command", "spawn_background"},
 	},
 }
 

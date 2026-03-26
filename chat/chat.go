@@ -100,6 +100,10 @@ func ChatWithHistory(cfg Config, history []Msg, prompt string) (string, error) {
 	}
 	if !cfg.ShowThinking {
 		result = reThink.ReplaceAllString(result, "")
+		// Catch any unclosed <think> block (model truncated mid-thought).
+		if idx := strings.Index(result, "<think>"); idx >= 0 {
+			result = result[:idx]
+		}
 	}
 	return strings.TrimSpace(result), nil
 }

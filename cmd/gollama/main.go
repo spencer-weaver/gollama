@@ -95,6 +95,7 @@ func runServer(cfg *config.GollamaConfig) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/conversation/process", handler.NewProcessHandler(ag))
+	mux.HandleFunc("POST /forward", handler.NewForwardHandler(ag))
 
 	srv := server.New(addr, mux)
 	log.Printf("gollama listening on %s", addr)
