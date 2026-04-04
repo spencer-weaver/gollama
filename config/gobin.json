@@ -1,0 +1,8 @@
+{
+  "name": "gollama",
+  "binary": "gollama.exe",
+  "version": "0.1.0",
+  "description": "Software development assistant. Conversational AI with access to PRAXIS tools via gobin.",
+  "commands": [],
+  "spec-version": "1"
+}

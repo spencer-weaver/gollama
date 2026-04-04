@@ -1,165 +1,202 @@
-// Package agent implements the core conversation processing logic for the
-// Home Assistant conversation agent API. It is decoupled from HTTP concerns.
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"log"
+	"os/exec"
 	"strings"
 
-	"github.com/spencer-weaver/gollama/chat"
-	"github.com/spencer-weaver/gollama/internal/config"
-	"github.com/spencer-weaver/gollama/internal/conversation"
-	"github.com/spencer-weaver/gollama/internal/tasks"
-	"github.com/spencer-weaver/gollama/internal/tools"
+	gcontext "github.com/spencer-weaver/gollama/internal/context"
+	"github.com/spencer-weaver/gollama/internal/history"
+	"github.com/spencer-weaver/gollama/internal/llm"
 )
 
-const (
-	maxToolIterations  = 10
-	maxHistoryMessages = 40
-)
+const toolCallFormat = `
+To call a tool, use this exact format in your response:
+<tool>
+tool: <toolname>
+command: <commandname>
+args: --argname value --argname2 value2
+</tool>
+Wait for the tool result before continuing. Do not guess argument names — use only the argument names shown in the tool specification above.
+`
 
-// Agent processes conversation turns against an Ollama model.
 type Agent struct {
-	ollCfg  chat.Config
-	store   *conversation.Store
-	tasks   *tasks.Manager
-	reg     *tools.Registry
-	allowed []string // tool names available to the model
+	client    *llm.Client
+	history   *history.History
+	context   *gcontext.ProjectContext
+	gobinPath string
+	system    string
 }
 
-// New creates an Agent wired to the given config, store, and task manager.
-// If cfg.AgentModel names a model config file it is loaded and applied on top
-// of the global config values.
-func New(cfg *config.GollamaConfig, store *conversation.Store, tm *tasks.Manager) *Agent {
-	reg := tools.DefaultRegistry()
-	// Re-register config-aware tools with explicit values from GollamaConfig.
-	reg.Register(tools.NewSearchWebTool(cfg.SearXNGURL))
-	reg.Register(tools.NewSpawnBackgroundTool(tm))
-	reg.Register(tools.NewHAServiceTool(cfg.HAHost, cfg.HAToken))
-	reg.Register(tools.NewHAStatesTool(cfg.HAHost, cfg.HAToken))
-
-	ollCfg := chat.Config{
-		Host:        cfg.Host,
-		Port:        cfg.Port,
-		Model:       cfg.Model,
-		System:      cfg.System,
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxTokens,
-	}
-
-	// Default to the ha tool mode; override from model config below.
-	allowed := tools.ToolsForMode("ha")
-
-	if cfg.AgentModel != "" {
-		mc, err := config.LoadModelConfig(cfg.ModelsDir, cfg.AgentModel)
-		if err != nil {
-			log.Printf("warning: could not load agent model %q: %v", cfg.AgentModel, err)
-		} else {
-			if mc.Model != "" {
-				ollCfg.Model = mc.Model
-			}
-			if mc.System != "" {
-				ollCfg.System = mc.System
-			}
-			if mc.Temperature != 0 {
-				ollCfg.Temperature = mc.Temperature
-			}
-			if mc.MaxTokens != 0 {
-				ollCfg.MaxTokens = mc.MaxTokens
-			}
-			if len(mc.Tools) > 0 {
-				allowed = mc.Tools
-			} else if mc.ToolMode != "" {
-				allowed = tools.ToolsForMode(mc.ToolMode)
-			}
-		}
-	}
-
-	if allowed == nil {
-		allowed = []string{}
-	}
-
+func NewAgent(client *llm.Client, hist *history.History, ctx *gcontext.ProjectContext, gobinPath, systemBase string) *Agent {
 	return &Agent{
-		ollCfg:  ollCfg,
-		store:   store,
-		tasks:   tm,
-		reg:     reg,
-		allowed: allowed,
+		client:    client,
+		history:   hist,
+		context:   ctx,
+		gobinPath: gobinPath,
+		system:    systemBase,
 	}
 }
 
-// ProcessTurn handles one voice command and returns the speech response.
-func (a *Agent) ProcessTurn(convID, text string) (string, error) {
-	history := a.store.Get(convID)
-	if len(history) > maxHistoryMessages {
-		history = history[len(history)-maxHistoryMessages:]
+// buildToolSpecs fetches tool descriptions via gobin and returns them as a
+// concatenated string of JSON blocks, one per tool. Tools that fail describe
+// are silently skipped.
+func (a *Agent) buildToolSpecs() string {
+	gobin := a.gobinPath + "/gobin"
+
+	listOut, err := runCommand(gobin, "agent", "list")
+	if err != nil || len(listOut) == 0 {
+		return ""
 	}
 
-	ollCfg := a.ollCfg
-	if len(a.allowed) > 0 {
-		ollCfg.System = a.reg.ToolGuide(a.allowed) + ollCfg.System
+	var tools []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(listOut), &tools); err != nil {
+		return ""
 	}
 
-	// If any background tasks finished since the last turn, fold their results
-	// into the prompt so the model can report them naturally.
-	prompt := text
-	if results := a.tasks.DrainUpdates(); len(results) > 0 {
-		var sb strings.Builder
-		sb.WriteString("Background task results (report these to the user naturally):\n")
-		for _, r := range results {
-			if r.Err != nil {
-				fmt.Fprintf(&sb, "- %s: failed: %v\n", r.Label, r.Err)
-			} else {
-				fmt.Fprintf(&sb, "- %s: %s\n", r.Label, r.Output)
+	var sb strings.Builder
+	for _, t := range tools {
+		spec, err := runCommand(gobin, "agent", "describe", t.Name)
+		if err != nil || spec == "" {
+			continue
+		}
+		sb.WriteString(spec)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// BuildSystemPrompt constructs the full system prompt by combining
+// systemBase + available tools from gobin + project context if loaded.
+func (a *Agent) BuildSystemPrompt() (string, error) {
+	var sb strings.Builder
+	sb.WriteString(a.system)
+
+	// Fetch tool descriptions and append as tools section.
+	if specs := a.buildToolSpecs(); specs != "" {
+		sb.WriteString("\n\nAvailable tools — call using the <tool> block format shown below.\n")
+		sb.WriteString("Each tool's full specification is listed. Use the exact command names and argument names shown.\n\n")
+		sb.WriteString(specs)
+		sb.WriteString(toolCallFormat)
+	}
+
+	// Append project context if available.
+	if a.context != nil && a.context.Exists() {
+		readme, ctxContent, err := a.context.Load()
+		if err != nil {
+			return "", fmt.Errorf("agent: load project context: %w", err)
+		}
+		if readme != "" || ctxContent != "" {
+			sb.WriteString("\n\n## Project Context\n")
+			if readme != "" {
+				sb.WriteString("\n### README\n")
+				sb.WriteString(readme)
+			}
+			if ctxContent != "" {
+				sb.WriteString("\n### .gollama/context.md\n")
+				sb.WriteString(ctxContent)
 			}
 		}
-		sb.WriteString("\nUser said: ")
-		sb.WriteString(text)
-		prompt = sb.String()
 	}
 
-	reply, err := a.runWithTools(ollCfg, history, prompt)
+	return sb.String(), nil
+}
+
+// Run executes the agent loop for one user input.
+// It sends the message to the model, handles any tool calls,
+// streams the response to stdout, and saves history.
+// Returns the assistant response string and an error.
+func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
+	a.history.Add("user", userInput)
+
+	systemPrompt, err := a.BuildSystemPrompt()
 	if err != nil {
 		return "", err
 	}
 
-	// Persist the turn with the original user text (not the injected prompt).
-	a.store.Append(convID,
-		chat.Msg{Role: "user", Content: text},
-		chat.Msg{Role: "assistant", Content: reply},
-	)
+	messages := buildMessages(systemPrompt, a.history.All())
 
-	return reply, nil
-}
-
-// runWithTools runs the model with an iterative tool-call loop.
-func (a *Agent) runWithTools(ollCfg chat.Config, history []chat.Msg, prompt string) (string, error) {
-	curHistory := history
-	curPrompt := prompt
-
-	for i := 0; i < maxToolIterations; i++ {
-		reply, err := chat.ChatWithHistory(ollCfg, curHistory, curPrompt)
-		if err != nil {
-			return "", err
-		}
-
-		if len(a.allowed) == 0 {
-			return reply, nil
-		}
-
-		calls, cleaned, found := a.reg.ParseToolCalls(reply)
-		if !found {
-			return reply, nil
-		}
-
-		results := a.reg.RunToolLoop(calls)
-		curHistory = append(curHistory,
-			chat.Msg{Role: "user", Content: curPrompt},
-			chat.Msg{Role: "assistant", Content: cleaned},
-		)
-		curPrompt = results
+	// Stream initial response.
+	response, err := a.streamResponse(ctx, messages)
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("tool loop exceeded %d iterations without a final response", maxToolIterations)
+	// Handle tool calls.
+	calls := Parse(response)
+	for _, call := range calls {
+		result, execErr := Execute(a.gobinPath, call)
+		if execErr != nil {
+			result = fmt.Sprintf("error: %v", execErr)
+		}
+		status := "ok"
+		if !strings.Contains(result, `"ok":true`) {
+			// extract error field if present
+			var res struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal([]byte(result), &res) == nil && res.Error != "" {
+				status = "failed: " + res.Error
+			} else {
+				status = "failed"
+			}
+		}
+		fmt.Printf("\n[tool: %s %s] %s\n", call.Tool, call.Command, status)
+
+		// Append assistant turn and tool result as user turn, then get follow-up.
+		messages = append(messages,
+			llm.Message{Role: "assistant", Content: response},
+			llm.Message{Role: "user", Content: result},
+		)
+		followUp, err := a.client.Complete(ctx, messages)
+		if err != nil {
+			return "", fmt.Errorf("agent: follow-up completion: %w", err)
+		}
+		fmt.Print(followUp)
+		response = followUp
+		messages = append(messages, llm.Message{Role: "assistant", Content: followUp})
+	}
+
+	a.history.Add("assistant", response)
+	if err := a.history.Save(); err != nil {
+		return response, fmt.Errorf("agent: save history: %w", err)
+	}
+	return response, nil
+}
+
+func (a *Agent) streamResponse(ctx context.Context, messages []llm.Message) (string, error) {
+	ch, err := a.client.Stream(ctx, messages)
+	if err != nil {
+		return "", fmt.Errorf("agent: stream: %w", err)
+	}
+	var sb strings.Builder
+	for event := range ch {
+		switch event.Type {
+		case "text":
+			fmt.Print(event.Content)
+			sb.WriteString(event.Content)
+		case "error":
+			return sb.String(), fmt.Errorf("agent: stream error: %s", event.Content)
+		}
+	}
+	return sb.String(), nil
+}
+
+func buildMessages(system string, history []llm.Message) []llm.Message {
+	msgs := make([]llm.Message, 0, len(history)+1)
+	msgs = append(msgs, llm.Message{Role: "system", Content: system})
+	msgs = append(msgs, history...)
+	return msgs
+}
+
+func runCommand(name string, args ...string) (string, error) {
+	out, err := exec.Command(name, args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
