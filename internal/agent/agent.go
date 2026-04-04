@@ -84,6 +84,11 @@ func (a *Agent) BuildSystemPrompt() (string, error) {
 		sb.WriteString(toolCallFormat)
 	}
 
+	// Inject absolute project directory so the model uses absolute paths.
+	if a.context != nil {
+		sb.WriteString(fmt.Sprintf("\nCurrent project directory: %s\nAlways use this as the base for all file paths when calling tools.\n", a.context.ProjectDir))
+	}
+
 	// Append project context if available.
 	if a.context != nil && a.context.Exists() {
 		readme, ctxContent, err := a.context.Load()
@@ -126,32 +131,35 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 		return "", err
 	}
 
-	// Handle tool calls.
-	calls := Parse(response)
-	for _, call := range calls {
-		result, execErr := Execute(a.gobinPath, call)
-		if execErr != nil {
-			result = fmt.Sprintf("error: %v", execErr)
+	// Handle tool calls in a loop until response contains no more tool calls.
+	for {
+		calls := Parse(response)
+		if len(calls) == 0 {
+			break
 		}
-		status := "ok"
-		if !strings.Contains(result, `"ok":true`) {
-			// extract error field if present
-			var res struct {
-				Error string `json:"error"`
+		for _, call := range calls {
+			result, execErr := Execute(a.gobinPath, call)
+			if execErr != nil {
+				result = fmt.Sprintf("error: %v", execErr)
 			}
-			if json.Unmarshal([]byte(result), &res) == nil && res.Error != "" {
-				status = "failed: " + res.Error
-			} else {
-				status = "failed"
+			status := "ok"
+			if !strings.Contains(result, `"ok":true`) {
+				var res struct {
+					Error string `json:"error"`
+				}
+				if json.Unmarshal([]byte(result), &res) == nil && res.Error != "" {
+					status = "failed: " + res.Error
+				} else {
+					status = "failed"
+				}
 			}
-		}
-		fmt.Printf("\n[tool: %s %s] %s\n", call.Tool, call.Command, status)
+			fmt.Printf("\n[tool: %s %s] %s\n", call.Tool, call.Command, status)
 
-		// Append assistant turn and tool result as user turn, then get follow-up.
-		messages = append(messages,
-			llm.Message{Role: "assistant", Content: response},
-			llm.Message{Role: "user", Content: result},
-		)
+			messages = append(messages,
+				llm.Message{Role: "assistant", Content: response},
+				llm.Message{Role: "user", Content: result},
+			)
+		}
 		followUp, err := a.client.Complete(ctx, messages)
 		if err != nil {
 			return "", fmt.Errorf("agent: follow-up completion: %w", err)
